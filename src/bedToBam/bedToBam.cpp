@@ -13,7 +13,9 @@
 #include "bedFile.h"
 #include "GenomeFile.h"
 #include "version.h"
-
+/*RL: add header*/
+#include "Fasta.h"
+#include "BlockedIntervals.h"
 
 #include "api/BamReader.h"
 #include "api/BamAux.h"
@@ -37,14 +39,21 @@ using namespace std;
 
 // function declarations
 void bedtobam_help(void);
-void ProcessBed(BedFile *bed, GenomeFile *genome, bool isBED12, int mapQual, bool uncompressedBam);
-void ConvertBedToBam(const BED &bed, BamAlignment &bam, map<string, int> &chromToId, bool isBED12, int mapQual, int lineNum);
+
+/*RL: Change of function definition*/
+void ProcessBed(BedFile *bed, GenomeFile *genome, const string &dbfile, bool isBED12, int mapQual, bool uncompressedBam);
+void ConvertBedToBam(const BED &bed, const string &seq, const uint32_t &flag, const int32_t &matePos, BamAlignment &bam, map<string, int> &chromToId, bool isBED12, int mapQual, int lineNum);
+
 void MakeBamHeader(const string &genomeFile, RefVector &refs, string &header, map<string, int> &chromToInt);
 int  bedtobam_reg2bin(int beg, int end);
 
 
 
 int bedtobam_main(int argc, char* argv[]) {
+    /*
+    * This function has been modified by Ruolin Liu in order to
+    * generated paried-end BAM from Flux Simulator Bed file.
+    */
 
     // our configuration variables
     bool showHelp = false;
@@ -52,11 +61,13 @@ int bedtobam_main(int argc, char* argv[]) {
     // input files
     string bedFile = "stdin";
     string genomeFile;
+    string fastaDbFile;
 
     int mapQual = 255;
 
     bool haveBed         = true;
     bool haveGenome      = false;
+    bool haveFastaDb     = false;
     bool haveMapQual     = false;
     bool isBED12         = false;
     bool uncompressedBam = false;
@@ -83,6 +94,15 @@ int bedtobam_main(int argc, char* argv[]) {
                 i++;
             }
         }
+
+        else if(PARAMETER_CHECK("-fi", 3, parameterLength)) {
+            if ((i+1) < argc) {
+                haveFastaDb = true;
+                fastaDbFile = argv[i + 1];
+                i++;
+            }
+        }
+
         else if(PARAMETER_CHECK("-g", 2, parameterLength)) {
             if ((i+1) < argc) {
                 haveGenome = true;
@@ -128,7 +148,7 @@ int bedtobam_main(int argc, char* argv[]) {
         BedFile *bed       = new BedFile(bedFile);
         GenomeFile *genome = new GenomeFile(genomeFile);
 
-        ProcessBed(bed, genome, isBED12, mapQual, uncompressedBam);
+        ProcessBed(bed, genome, fastaDbFile, isBED12, mapQual, uncompressedBam);
     }
     else {
         bedtobam_help();
@@ -143,7 +163,7 @@ void bedtobam_help(void) {
     cerr << "Version: " << VERSION << "\n";
     cerr << "Summary: Converts feature records to BAM format." << endl << endl;
 
-    cerr << "Usage:   " << PROGRAM_NAME << " [OPTIONS] -i <bed/gff/vcf> -g <genome>" << endl << endl;
+    cerr << "Usage:   " << PROGRAM_NAME << " [OPTIONS] -i <bed/gff/vcf> -g <genome> -fi <fasta>" << endl << endl;
 
     cerr << "Options: " << endl;
 
@@ -164,7 +184,11 @@ void bedtobam_help(void) {
 }
 
 
-void ProcessBed(BedFile *bed, GenomeFile *genome, bool isBED12, int mapQual, bool uncompressedBam) {
+void ProcessBed(BedFile *bed, GenomeFile *genome, const string &dbfile, bool isBED12, int mapQual, bool uncompressedBam) {
+   /*
+    * This function has been modified by Ruolin Liu in order to
+    * generated paried-end BAM from Flux Simulator Bed file.
+    */
 
     BamWriter *writer = new BamWriter();
 
@@ -181,18 +205,135 @@ void ProcessBed(BedFile *bed, GenomeFile *genome, bool isBED12, int mapQual, boo
     // open a BAM and add the reference headers to the BAM file
     writer->Open("stdout", bamHeader, refs);
 
-
+    FastaReference *fr = new FastaReference;
+    bool memmap = true;
+    fr->open(dbfile, memmap, false);
+    //cerr<<dbfile<<endl;
     // process each BED entry and convert to BAM
-    BED bedEntry;
+
+    BED bedEntry1; /*RL: process pair*/
+    BED bedEntry2;
+    string bam_seq1; /*RL: for BAM sequence*/
+    uint32_t bam_flag1; /*RL: for BAM flag*/
+    string bam_seq2;
+    uint32_t bam_flag2;
+
     // open the BED file for reading.
     bed->Open();
-    while (bed->GetNextBed(bedEntry)) {
+    while (bed->GetNextBed(bedEntry1)) {
+        bed->GetNextBed(bedEntry2);
         if (bed->_status == BED_VALID) {
-            BamAlignment bamEntry;
-            if (bed->bedType >= 4) {
-                ConvertBedToBam(bedEntry, bamEntry, chromToId, isBED12, mapQual, bed->_lineNum);
-                writer->SaveAlignment(bamEntry);
+            /*RL EDIT BEGIN*/
+            //make sure two entry pair-up
+            string entry_name1 = bedEntry1.name.substr(0, bedEntry1.name.size()-4);
+            string entry_name2 = bedEntry2.name.substr(0, bedEntry2.name.size()-4);
+            assert(entry_name1 == entry_name2);
+
+            bam_seq1.clear();
+            bam_seq2.clear();
+            size_t seqLength = fr->sequenceLength(bedEntry1.chrom);
+            if(seqLength){
+                // make sure this feature will not exceed
+                // the end of the chromosome and not a polyA read.
+                if( (bedEntry1.start <= seqLength) && (bedEntry1.end <= seqLength)
+                        && (bedEntry1.chrom != "polyA"))
+                {
+                    int length = bedEntry1.end - bedEntry1.start;
+                    bedVector bedBlocks;
+                    GetBedBlocks(bedEntry1, bedBlocks);
+
+                    for(int i = 0; i< (int) bedBlocks.size(); ++i){
+                        bam_seq1 += fr->getSubSequence(bedEntry1.chrom,
+                                bedBlocks[i].start,
+                                bedBlocks[i].end - bedBlocks[i].start);
+                    }
+                }
+
+                if( (bedEntry2.start <= seqLength) && (bedEntry2.end <= seqLength)
+                        && (bedEntry2.chrom != "polyA"))
+                {
+                    int length = bedEntry2.end - bedEntry2.start;
+                    bedVector bedBlocks;
+                    GetBedBlocks(bedEntry2, bedBlocks);
+                    for(int i = 0; i< (int) bedBlocks.size(); ++i){
+                        bam_seq2 += fr->getSubSequence(bedEntry2.chrom,
+                                bedBlocks[i].start,
+                                bedBlocks[i].end - bedBlocks[i].start);
+                    }
+                }
+
             }
+            string entry_flag = bedEntry1.name.substr(bedEntry1.name.size()-3, 3);
+
+            // entry one
+            if ( entry_flag == "S/1" || entry_flag == "A/1"){
+                if(bedEntry1.strand == "+")
+                    bam_flag1 = 99;
+                else if(bedEntry1.strand == "-")
+                    bam_flag1 = 83;
+                else
+                    assert(false);
+            }
+            else if( entry_flag == "S/2" || entry_flag == "A/2"){
+                if(bedEntry1.strand == "+")
+                    bam_flag1 = 163;
+                else if(bedEntry1.strand == "-")
+                    bam_flag1 = 147;
+                else
+                    assert(false);
+            }
+            else{
+                assert(false);
+            }
+
+            //entry two
+            entry_flag = bedEntry2.name.substr(bedEntry2.name.size()-3, 3);
+            if ( entry_flag == "S/1" || entry_flag == "A/1"){
+                if(bedEntry2.strand == "+")
+                    bam_flag2 = 99;
+                else if(bedEntry2.strand == "-")
+                    bam_flag2 = 83;
+                else
+                    assert(false);
+            }
+            else if( entry_flag == "S/2" || entry_flag == "A/2"){
+                if(bedEntry2.strand == "+")
+                    bam_flag2 = 163;
+                else if(bedEntry2.strand == "-")
+                    bam_flag2 = 147;
+                else
+                    assert(false);
+            }
+            else{
+                assert(false);
+            }
+
+            BamAlignment bamEntry1;
+            BamAlignment bamEntry2;
+            if (bed->bedType >= 4) {
+
+                //differentiate polyA read v.s. non-polyA reads
+                if(bam_seq1.empty() || bam_seq2.empty()){
+                    if( bam_seq1.empty() && bam_seq2.empty() ){
+                        continue;
+                    }
+                    if(bam_seq1.empty()){
+                        ConvertBedToBam(bedEntry2, bam_seq2, bam_flag2, -1, bamEntry2, chromToId, isBED12, mapQual, bed->_lineNum);
+                        writer->SaveAlignment(bamEntry2);
+                    }
+                    else{
+                        ConvertBedToBam(bedEntry1, bam_seq1, bam_flag1, -1, bamEntry1, chromToId, isBED12, mapQual, bed->_lineNum);
+                        writer->SaveAlignment(bamEntry1);
+                    }
+                }
+                else{
+                    ConvertBedToBam(bedEntry1, bam_seq1, bam_flag1, bedEntry2.start, bamEntry1, chromToId, isBED12, mapQual, bed->_lineNum);
+                    writer->SaveAlignment(bamEntry1);
+                    ConvertBedToBam(bedEntry2, bam_seq2, bam_flag2, bedEntry1.start, bamEntry2, chromToId, isBED12, mapQual, bed->_lineNum);
+                    writer->SaveAlignment(bamEntry2);
+                }
+            }
+            /*RL: EDIT END*/
             else {
                 cerr << "Error: BED entry without name found at line: " << bed->_lineNum << ".  Exiting!" << endl;
                 exit (1);
@@ -205,8 +346,12 @@ void ProcessBed(BedFile *bed, GenomeFile *genome, bool isBED12, int mapQual, boo
 }
 
 
-void ConvertBedToBam(const BED &bed, BamAlignment &bam, map<string, int, std::less<string> > &chromToId,
+void ConvertBedToBam(const BED &bed,  const string &seq, const uint32_t &flag, const int32_t &matePos, BamAlignment &bam, map<string, int, std::less<string> > &chromToId,
                      bool isBED12, int mapQual, int lineNum) {
+   /*
+    * This function has been modified by Ruolin Liu in order to
+    * generated paried-end BAM from Flux Simulator Bed file.
+    */
 
     bam.Name       = bed.name;
     bam.Position   = bed.start;
@@ -219,22 +364,32 @@ void ConvertBedToBam(const BED &bed, BamAlignment &bam, map<string, int, std::le
     // so the sequence is inherently the same as it's
     // reference genome.
     // Thanks to James M. Ward for pointing this out.
-    bam.QueryBases = "";
-    bam.Qualities  = "";
-
+    //bam.QueryBases = "";
+    //bam.Qualities  = "";
+    bam.QueryBases = seq;
+    bam.Qualities = string(seq.size(), 'I');
     // chrom and map quality
     bam.RefID      = chromToId[bed.chrom];
     bam.MapQuality = mapQual;
-
     // set the BAM FLAG
-    bam.AlignmentFlag = 0;
-    if (bed.strand == "-")
-        bam.SetIsReverseStrand(true);
+    bam.AlignmentFlag = flag;
+    //bam.AlignmentFlag = 0;
+    //if (bed.strand == "-")
+        //bam.SetIsReverseStrand(true);
 
-    bam.MatePosition = -1;
-    bam.InsertSize   = 0;
-    bam.MateRefID    = -1;
+    //bam.MatePosition = -1;
+    //bam.InsertSize   = 0;
+    //bam.MateRefID    = -1;
 
+    bam.MatePosition = matePos;
+    if(matePos == -1){
+        bam.MateRefID = -1;
+        bam.InsertSize = 0;
+    }
+    else{
+        bam.MateRefID = chromToId[bed.chrom];
+        bam.InsertSize   = matePos - bam.Position;
+    }
     bam.CigarData.clear();
 
     if (isBED12 == false) {

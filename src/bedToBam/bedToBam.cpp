@@ -30,6 +30,21 @@ using namespace BamTools;
 using namespace std;
 
 
+/*RL define enum*/
+enum Orient{
+    S1 = 0,
+    S2,
+    A1,
+    A2
+};
+
+Orient hashit (std::string const& inString){
+    if(inString == "S/1") return S1;
+    if(inString == "S/2") return S2;
+    if(inString == "A/1") return A1;
+    if(inString == "A/2") return A2;
+}
+
 // define our program name
 #define PROGRAM_NAME "bedtools bedtobam"
 
@@ -213,14 +228,16 @@ void ProcessBed(BedFile *bed, GenomeFile *genome, const string &dbfile, bool isB
 
     BED bedEntry1; /*RL: process pair*/
     BED bedEntry2;
-    string bam_seq1; /*RL: for BAM sequence*/
-    uint32_t bam_flag1; /*RL: for BAM flag*/
-    string bam_seq2;
-    uint32_t bam_flag2;
+    BED nullBed;
 
+    string bam_seq1; /*RL: for BAM sequence*/
+    uint32_t bam_flag1 = 0; /*RL: for BAM flag*/
+    string bam_seq2;
+    uint32_t bam_flag2 = 0;
     // open the BED file for reading.
     bed->Open();
     while (bed->GetNextBed(bedEntry1)) {
+
         bed->GetNextBed(bedEntry2);
         if (bed->_status == BED_VALID) {
             /*RL EDIT BEGIN*/
@@ -264,48 +281,105 @@ void ProcessBed(BedFile *bed, GenomeFile *genome, const string &dbfile, bool isB
 
             }
             string entry_flag = bedEntry1.name.substr(bedEntry1.name.size()-3, 3);
-
+            string entry_name = bedEntry1.name.substr(0, bedEntry1.name.size()-4);
+            bedEntry1.name = entry_name;
             // entry one
-            if ( entry_flag == "S/1" || entry_flag == "A/1"){
-                if(bedEntry1.strand == "+")
+            switch (hashit(entry_flag)){
+            // replace bedEntry.strand with reference transcript strandness
+            case S1:
+                if(bedEntry1.strand == "+"){
+                    bedEntry1.strand = "+";
                     bam_flag1 = 99;
-                else if(bedEntry1.strand == "-")
+                }
+                else{
+                    bedEntry1.strand = "-";
                     bam_flag1 = 83;
-                else
-                    assert(false);
-            }
-            else if( entry_flag == "S/2" || entry_flag == "A/2"){
-                if(bedEntry1.strand == "+")
+                }
+                break;
+            case S2:
+                if(bedEntry1.strand == "+"){
+                    bedEntry1.strand = "+";
+                    bam_flag1= 163;
+                }
+                else{
+                    bedEntry1.strand = "-";
+                    bam_flag1 =  147;
+                }
+                break;
+            case A1:
+                if(bedEntry1.strand == "+"){
+                    bedEntry1.strand = "-";
+                    bam_flag1 = 99;
+                }
+                else{
+                    bedEntry1.strand = "+";
+                    bam_flag1 = 83;
+                }
+                break;
+            case A2:
+                if(bedEntry1.strand == "+"){
+                    bedEntry1.strand = "-";
                     bam_flag1 = 163;
-                else if(bedEntry1.strand == "-")
+                }
+                else{
+                    bedEntry1.strand = "+";
                     bam_flag1 = 147;
-                else
-                    assert(false);
-            }
-            else{
+                }
+                break;
+            default:
                 assert(false);
+                break;
             }
 
             //entry two
             entry_flag = bedEntry2.name.substr(bedEntry2.name.size()-3, 3);
-            if ( entry_flag == "S/1" || entry_flag == "A/1"){
-                if(bedEntry2.strand == "+")
+            entry_name = bedEntry2.name.substr(0, bedEntry2.name.size()-4);
+            bedEntry2.name = entry_name;
+            switch (hashit(entry_flag)){
+            // replace bedEntry.strand with reference transcript strandness
+            case S1:
+                if(bedEntry2.strand == "+"){
+                    bedEntry2.strand = "+";
                     bam_flag2 = 99;
-                else if(bedEntry2.strand == "-")
+                }
+                else{
+                    bedEntry2.strand = "-";
                     bam_flag2 = 83;
-                else
-                    assert(false);
-            }
-            else if( entry_flag == "S/2" || entry_flag == "A/2"){
-                if(bedEntry2.strand == "+")
+                }
+                break;
+            case S2:
+                if(bedEntry2.strand == "+"){
+                    bedEntry2.strand = "+";
+                    bam_flag2= 163;
+                }
+                else{
+                    bedEntry2.strand = "-";
+                    bam_flag2 =  147;
+                }
+                break;
+            case A1:
+                if(bedEntry2.strand == "+"){
+                    bedEntry2.strand = "-";
+                    bam_flag2 = 99;
+                }
+                else{
+                    bedEntry2.strand = "+";
+                    bam_flag2 = 83;
+                }
+                break;
+            case A2:
+                if(bedEntry2.strand == "+"){
+                    bedEntry2.strand = "-";
                     bam_flag2 = 163;
-                else if(bedEntry2.strand == "-")
+                }
+                else{
+                    bedEntry2.strand = "+";
                     bam_flag2 = 147;
-                else
-                    assert(false);
-            }
-            else{
+                }
+                break;
+            default:
                 assert(false);
+                break;
             }
 
             BamAlignment bamEntry1;
@@ -318,11 +392,18 @@ void ProcessBed(BedFile *bed, GenomeFile *genome, const string &dbfile, bool isB
                         continue;
                     }
                     if(bam_seq1.empty()){
-                        ConvertBedToBam(bedEntry2, bam_seq2, bam_flag2, -1, bamEntry2, chromToId, isBED12, mapQual, bed->_lineNum);
+                        if(bedEntry2.strand == "+")
+                            ConvertBedToBam(bedEntry2, bam_seq2, 0, -1, bamEntry2, chromToId, isBED12, mapQual, bed->_lineNum);
+                        else
+                            ConvertBedToBam(bedEntry2, bam_seq2, 16, -1, bamEntry2, chromToId, isBED12, mapQual, bed->_lineNum);
+
                         writer->SaveAlignment(bamEntry2);
                     }
                     else{
-                        ConvertBedToBam(bedEntry1, bam_seq1, bam_flag1, -1, bamEntry1, chromToId, isBED12, mapQual, bed->_lineNum);
+                        if(bedEntry1.strand == "+")
+                            ConvertBedToBam(bedEntry1, bam_seq1, 0, -1, bamEntry1, chromToId, isBED12, mapQual, bed->_lineNum);
+                        else
+                            ConvertBedToBam(bedEntry1, bam_seq1, 16, -1, bamEntry1, chromToId, isBED12, mapQual, bed->_lineNum);
                         writer->SaveAlignment(bamEntry1);
                     }
                 }
@@ -332,6 +413,8 @@ void ProcessBed(BedFile *bed, GenomeFile *genome, const string &dbfile, bool isB
                     ConvertBedToBam(bedEntry2, bam_seq2, bam_flag2, bedEntry1.start, bamEntry2, chromToId, isBED12, mapQual, bed->_lineNum);
                     writer->SaveAlignment(bamEntry2);
                 }
+                bedEntry1 = nullBed;
+                bedEntry2 = nullBed;
             }
             /*RL: EDIT END*/
             else {
@@ -390,6 +473,21 @@ void ConvertBedToBam(const BED &bed,  const string &seq, const uint32_t &flag, c
         bam.MateRefID = chromToId[bed.chrom];
         bam.InsertSize   = matePos - bam.Position;
     }
+
+    bam.AddTag("NM","i", 0);
+    bam.AddTag("NH","i", 1);
+    if(bed.strand == "+"){
+        const uint8_t pos = 43;
+        bam.AddTag("XS", "A", pos);
+    }
+    else if(bed.strand == "-"){
+        const uint8_t neg = 45;
+        bam.AddTag("XS", "A", neg);
+    }
+    else
+        assert(false);
+
+
     bam.CigarData.clear();
 
     if (isBED12 == false) {

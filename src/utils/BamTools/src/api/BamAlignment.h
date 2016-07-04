@@ -187,7 +187,6 @@ class API_EXPORT BamAlignment {
 */
 template<typename T>
 inline bool BamAlignment::AddTag(const std::string& tag, const std::string& type, const T& value) {
-
     // if char data not populated, do that first
     if ( SupportData.HasCoreOnly )
         BuildCharData();
